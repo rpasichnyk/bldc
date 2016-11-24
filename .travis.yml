@@ -1,15 +1,19 @@
 language: c
-
 dist: trusty
 sudo: required
-
 before_install:
-  - sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6D1D8367A3421AFB
-  - sudo add-apt-repository ppa:terry.guo/gcc-arm-embedded -y
-  - sudo apt-get update -q
-  - sudo apt-get install gcc-arm-none-eabi=4.9.3.2015q3-1trusty1 -y
-
+- sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6D1D8367A3421AFB
+- sudo add-apt-repository ppa:terry.guo/gcc-arm-embedded -y
+- sudo apt-get update -q
+- sudo apt-get install gcc-arm-none-eabi=4.9.3.2015q3-1trusty1 -y
 git:
   depth: 1
-
 script: make
+deploy:
+  provider: releases
+  skip_cleanup: true
+  api_key:
+    secure: dU9i8J2ytiHYsE97XqXmQmS5Es09DuBNcFPN4ZGQqWAhzmyj9CNOZLcoEdONsG0Z4IOmocLQ4OpivEokLMO3ptlKw5o3Y2QgBEswld4LUICMvVEC5iXD5JSHV3Xr3j6l8dxDOtzke5xEXeSaDqVLibb+Yl3nS3jEhJ6qh3HQ4figfjpLqQFrBBa81VN2NlloJuwHv7jHLwLr7D/xTVh+f4VGTtFiWgr1GpNeH+m7+yfNsa6ksaeDEBtW+NszZTHbbix8OAx6GTybVihcn8c65ym5w9hY4lL9Q2TGvTiBUH83yi+FB0Kx3Amf5XpNdgE+zv1VjxQQamvTojPG8kruY8bjTKO7wk3CkfnElwryR7mtLsxBmdNYBN7WghVMf4CpV6V2TfGd0Vey45wnyDqm/2R+wAbLxI96JaQzgujQpWmgIvZ899pTaRtuzUR6w0yBG9+HIBIh+nKzyf178/eLfKPSuxGjM8DtjVEW8zEmOZLj0GE2UmYgCQsq2ynMVJL+NnswPWwLGiLe7h6toqu0DxLMYliLyp2JKQkUEB1kNoRKdW2Qj1QQlfPXrQE7QpU6/zLFGuRVEkjoLABJLEQMjfJziMSvv85BHjDGndOmGjGGt4mx4c/xEggQ5We594dTXPja+X6wOOTDIQs22Zdd9P0Xz7O6lN5+CC7Rh8+PxyY=
+  file: build/BLDC_4_ChibiOS.bin
+  on:
+    tags: true
