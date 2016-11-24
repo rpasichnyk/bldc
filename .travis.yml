@@ -1,0 +1,14 @@
+language: c
+
+dist: trusty
+sudo: required
+
+before_install:
+  - sudo add-apt-repository ppa:terry.guo/gcc-arm-embedded -y
+  - sudo apt-get update -q
+  - sudo apt-get install gcc-arm-none-eabi=4.9.3.2015q3-1trusty1 -y
+
+git:
+  depth: 1
+
+script: make
