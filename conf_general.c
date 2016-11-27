@@ -384,6 +384,12 @@ bool conf_general_detect_motor_param(float current, float min_rpm, float low_dut
 	mcconf.sl_min_erpm = min_rpm;
 	mc_interface_set_configuration(&mcconf);
 
+	// Disable timeout
+	timeout_reset();
+	systime_t tout = timeout_get_timeout_msec();
+	float tout_c = timeout_get_brake_current();
+	timeout_configure(20000, 0.0);
+
 	mc_interface_lock();
 
 	mc_interface_lock_override_once();
@@ -482,6 +488,9 @@ bool conf_general_detect_motor_param(float current, float min_rpm, float low_dut
 	mc_interface_set_configuration(&mcconf_old);
 
 	mc_interface_unlock();
+
+	// Enable timeout back
+	timeout_configure(tout, tout_c);
 
 	return ok_steps == 5 ? true : false;
 }
