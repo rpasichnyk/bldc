@@ -531,6 +531,7 @@ bool conf_general_measure_flux_linkage(float current, float duty,
 	chThdSleepMilliseconds(1000);
 
 	// Disable timeout
+	timeout_reset();
 	systime_t tout = timeout_get_timeout_msec();
 	float tout_c = timeout_get_brake_current();
 	timeout_configure(60000, 0.0);
@@ -578,6 +579,9 @@ bool conf_general_measure_flux_linkage(float current, float duty,
 	avg_voltage -= avg_current * res * 2.0;
 
 	*linkage = avg_voltage * 60.0 / (sqrtf(3.0) * 2.0 * M_PI * avg_rpm);
+
+	// Enable timeout back
+	timeout_configure(tout, tout_c);
 
 	return true;
 }

@@ -621,10 +621,19 @@ void commands_process_packet(unsigned char *data, unsigned int len) {
 		mcconf.motor_type = MOTOR_TYPE_FOC;
 		mc_interface_set_configuration(&mcconf);
 
+		// Disable timeout
+		timeout_reset();
+		systime_t tout = timeout_get_timeout_msec();
+		float tout_c = timeout_get_brake_current();
+		timeout_configure(60000, 0.0);
+
 		float r = 0.0;
 		float l = 0.0;
 		bool res = mcpwm_foc_measure_res_ind(&r, &l);
 		mc_interface_set_configuration(&mcconf_old);
+
+		// Enable timeout back
+		timeout_configure(tout, tout_c);
 
 		if (!res) {
 			r = 0.0;
