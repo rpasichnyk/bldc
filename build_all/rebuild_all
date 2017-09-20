@@ -1,7 +1,9 @@
 #!/bin/bash
+set -e
 
 FWPATH="../"
 DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
+pushd $DIR
 
 ################## HW 46 & 47 #######################
 
@@ -176,5 +178,5 @@ cp $FWPATH/build/BLDC_4_ChibiOS.bin $COPYDIR/VESC_default.bin
 # Clean
 cd $FWPATH
 make clean
-cd $DIR
 
+popd
