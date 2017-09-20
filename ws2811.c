@@ -1,12 +1,14 @@
 /*
-	Copyright 2012-2014 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -14,13 +16,6 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
     */
-
-/*
- * ws2811.c
- *
- *  Created on: 14 jul 2013
- *      Author: benjamin
- */
 
 #include <math.h>
 #include "ws2811.h"
@@ -40,6 +35,7 @@
 static uint16_t bitbuffer[BITBUFFER_LEN];
 static uint32_t RGBdata[LED_BUFFER_LEN];
 static uint8_t gamma_table[256];
+static uint32_t brightness;
 
 // Private function prototypes
 static uint32_t rgb_to_local(uint32_t color);
@@ -48,6 +44,8 @@ void ws2811_init(void) {
 	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
 	TIM_OCInitTypeDef  TIM_OCInitStructure;
 	DMA_InitTypeDef DMA_InitStructure;
+
+	brightness = 100;
 
 	// Default LED values
 	int i, bit;
@@ -170,7 +168,7 @@ void ws2811_init(void) {
 }
 
 void ws2811_set_led_color(int led, uint32_t color) {
-	if (led < WS2811_LED_NUM) {
+	if (led >= 0 && led < WS2811_LED_NUM) {
 		RGBdata[led] = color;
 
 		color = rgb_to_local(color);
@@ -188,7 +186,7 @@ void ws2811_set_led_color(int led, uint32_t color) {
 }
 
 uint32_t ws2811_get_led_color(int led) {
-	if (led < WS2811_LED_NUM) {
+	if (led >= 0 && led < WS2811_LED_NUM) {
 		return RGBdata[led];
 	}
 
@@ -226,10 +224,26 @@ void ws2811_set_all(uint32_t color) {
 	}
 }
 
+void ws2811_set_brightness(uint32_t br) {
+	brightness = br;
+
+	for (int i = 0;i < WS2811_LED_NUM;i++) {
+		ws2811_set_led_color(i, ws2811_get_led_color(i));
+	}
+}
+
+uint32_t ws2811_get_brightness(void) {
+	return brightness;
+}
+
 static uint32_t rgb_to_local(uint32_t color) {
 	uint32_t r = (color >> 16) & 0xFF;
 	uint32_t g = (color >> 8) & 0xFF;
 	uint32_t b = color & 0xFF;
+
+	r = (r * brightness) / 100;
+	g = (g * brightness) / 100;
+	b = (b * brightness) / 100;
 
 	r = gamma_table[r];
 	g = gamma_table[g];

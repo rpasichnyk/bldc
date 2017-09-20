@@ -5,7 +5,7 @@
 
 # Compiler options here.
 ifeq ($(USE_OPT),)
-  USE_OPT = -O2 -ggdb -fomit-frame-pointer -falign-functions=16 -std=gnu99
+  USE_OPT = -O2 -ggdb -fomit-frame-pointer -falign-functions=16 -std=gnu99 -D_GNU_SOURCE
   USE_OPT += -DBOARD_OTG_NOVBUSSENS $(build_args)
   USE_OPT += -fsingle-precision-constant -Wdouble-promotion
 endif
@@ -62,13 +62,13 @@ endif
 # Stack size to be allocated to the Cortex-M process stack. This stack is
 # the stack used by the main() thread.
 ifeq ($(USE_PROCESS_STACKSIZE),)
-  USE_PROCESS_STACKSIZE = 0x400
+  USE_PROCESS_STACKSIZE = 0x800
 endif
 
 # Stack size to the allocated to the Cortex-M main/exceptions stack. This
 # stack is used for processing interrupts and exceptions.
 ifeq ($(USE_EXCEPTIONS_STACKSIZE),)
-  USE_EXCEPTIONS_STACKSIZE = 0x400
+  USE_EXCEPTIONS_STACKSIZE = 0x800
 endif
 
 # Enables the use of FPU on Cortex-M4 (no, softfp, hard).
@@ -94,18 +94,16 @@ PROJECT = BLDC_4_ChibiOS
 
 # Imported source files and paths
 CHIBIOS = ChibiOS_3.0.2
-# Startup files.
+# Startup files
 include $(CHIBIOS)/os/common/ports/ARMCMx/compilers/GCC/mk/startup_stm32f4xx.mk
-# HAL-OSAL files (optional).
+# HAL-OSAL files
 include $(CHIBIOS)/os/hal/hal.mk
 include $(CHIBIOS)/os/hal/ports/STM32/STM32F4xx/platform.mk
-include $(CHIBIOS)/os/hal/boards/ST_STM32F4_DISCOVERY/board.mk
 include $(CHIBIOS)/os/hal/osal/rt/osal.mk
-# RTOS files (optional).
+# RTOS files
 include $(CHIBIOS)/os/rt/rt.mk
 include $(CHIBIOS)/os/rt/ports/ARMCMx/compilers/GCC/mk/port_v7m.mk
-# Other files (optional).
-#include $(CHIBIOS)/test/rt/test.mk
+# Other files
 include hwconf/hwconf.mk
 include applications/applications.mk
 include nrf/nrf.mk
@@ -121,9 +119,9 @@ CSRC = $(STARTUPSRC) \
        $(OSALSRC) \
        $(HALSRC) \
        $(PLATFORMSRC) \
-       $(BOARDSRC) \
        $(CHIBIOS)/os/hal/lib/streams/chprintf.c \
        $(CHIBIOS)/os/various/syscalls.c \
+       board.c \
        main.c \
        comm_usb_serial.c \
        irq_handlers.c \
@@ -182,7 +180,7 @@ TCPPSRC =
 ASMSRC = $(STARTUPASM) $(PORTASM) $(OSALASM)
 
 INCDIR = $(STARTUPINC) $(KERNINC) $(PORTINC) $(OSALINC) \
-         $(HALINC) $(PLATFORMINC) $(BOARDINC) $(TESTINC) \
+         $(HALINC) $(PLATFORMINC) \
          $(CHIBIOS)/os/various \
          $(CHIBIOS)/os/hal/lib/streams \
          mcconf \
@@ -269,13 +267,19 @@ build/$(PROJECT).bin: build/$(PROJECT).elf
 
 # Program
 upload: build/$(PROJECT).bin
-	#qstlink2 --cli --erase --write build/$(PROJECT).bin
-	#openocd -f interface/stlink-v2.cfg -c "set WORKAREASIZE 0x2000" -f target/stm32f4x_stlink.cfg -c "program build/$(PROJECT).elf verify reset" # Older openocd
+#	qstlink2 --cli --erase --write build/$(PROJECT).bin
+#	openocd -f interface/stlink-v2.cfg -c "set WORKAREASIZE 0x2000" -f target/stm32f4x_stlink.cfg -c "program build/$(PROJECT).elf verify reset" # Older openocd
 	openocd -f board/stm32f4discovery.cfg -c "reset_config trst_only combined" -c "program build/$(PROJECT).elf verify reset exit" # For openocd 0.9
 
 #program with olimex arm-usb-tiny-h and jtag-swd adapter board. needs openocd>=0.9
 upload-olimex: build/$(PROJECT).bin
 	openocd -f interface/ftdi/olimex-arm-usb-tiny-h.cfg -f interface/ftdi/olimex-arm-jtag-swd.cfg -c "set WORKAREASIZE 0x2000" -f target/stm32f4x.cfg -c "program build/$(PROJECT).elf verify reset"
+
+upload-pi: build/$(PROJECT).bin
+	openocd -f pi_stm32.cfg -c "reset_config trst_only combined" -c "program build/$(PROJECT).elf verify reset exit"
+
+upload-pi-remote: build/$(PROJECT).elf
+	./upload_remote_pi build/$(PROJECT).elf ted 10.42.0.199 22
 
 debug-start:
 	openocd -f stm32-bv_openocd.cfg

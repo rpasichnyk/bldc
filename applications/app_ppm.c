@@ -1,26 +1,21 @@
 /*
-	Copyright 2012-2015 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-/*
- * app_ppm.c
- *
- *  Created on: 18 apr 2014
- *      Author: benjamin
- */
+    */
 
 #include "app.h"
 
@@ -52,8 +47,10 @@ static void servodec_func(void);
 
 // Private variables
 static volatile bool is_running = false;
+static volatile bool stop_now = true;
 static volatile ppm_config config;
 static volatile int pulses_without_power = 0;
+static float input_val = 0.0;
 
 // Private functions
 static void update(void *p);
@@ -74,11 +71,35 @@ void app_ppm_configure(ppm_config *conf) {
 
 void app_ppm_start(void) {
 #if !SERVO_OUT_ENABLE
+	stop_now = false;
 	chThdCreateStatic(ppm_thread_wa, sizeof(ppm_thread_wa), NORMALPRIO, ppm_thread, NULL);
 
 	chSysLock();
 	chVTSetI(&vt, MS2ST(1), update, NULL);
 	chSysUnlock();
+#endif
+}
+
+void app_ppm_stop(void) {
+#if !SERVO_OUT_ENABLE
+	stop_now = true;
+
+	if (is_running) {
+		chEvtSignalI(ppm_tp, (eventmask_t) 1);
+		servodec_stop();
+	}
+
+	while(is_running) {
+		chThdSleepMilliseconds(1);
+	}
+#endif
+}
+
+float app_ppm_get_decoded_level(void) {
+#if !SERVO_OUT_ENABLE
+	return input_val;
+#else
+	return 0.0;
 #endif
 }
 
@@ -91,6 +112,10 @@ static void servodec_func(void) {
 }
 
 static void update(void *p) {
+	if (!is_running) {
+		return;
+	}
+
 	chSysLockFromISR();
 	chVTSetI(&vt, MS2ST(2), update, p);
 	chEvtSignalI(ppm_tp, (eventmask_t) 1);
@@ -110,42 +135,75 @@ static THD_FUNCTION(ppm_thread, arg) {
 	for(;;) {
 		chEvtWaitAny((eventmask_t) 1);
 
+		if (stop_now) {
+			is_running = false;
+			return;
+		}
+
+		const volatile mc_configuration *mcconf = mc_interface_get_configuration();
+		const float rpm_now = mc_interface_get_rpm();
+		float servo_val = servodec_get_servo(0);
+		float servo_ms = utils_map(servo_val, -1.0, 1.0, config.pulse_start, config.pulse_end);
+
+		switch (config.ctrl_type) {
+		case PPM_CTRL_TYPE_CURRENT_NOREV:
+		case PPM_CTRL_TYPE_DUTY_NOREV:
+		case PPM_CTRL_TYPE_PID_NOREV:
+			input_val = servo_val;
+			servo_val += 1.0;
+			servo_val /= 2.0;
+			break;
+
+		default:
+			// Mapping with respect to center pulsewidth
+			if (servo_ms < config.pulse_center) {
+				servo_val = utils_map(servo_ms, config.pulse_start,
+						config.pulse_center, -1.0, 0.0);
+			} else {
+				servo_val = utils_map(servo_ms, config.pulse_center,
+						config.pulse_end, 0.0, 1.0);
+			}
+			input_val = servo_val;
+			break;
+		}
+
 		if (timeout_has_timeout() || servodec_get_time_since_update() > timeout_get_timeout_msec() ||
 				mc_interface_get_fault() != FAULT_CODE_NONE) {
 			pulses_without_power = 0;
 			continue;
 		}
 
-		float servo_val = servodec_get_servo(0);
-
-		switch (config.ctrl_type) {
-		case PPM_CTRL_TYPE_CURRENT_NOREV:
-		case PPM_CTRL_TYPE_DUTY_NOREV:
-		case PPM_CTRL_TYPE_PID_NOREV:
-			servo_val += 1.0;
-			servo_val /= 2.0;
-			break;
-
-		default:
-			break;
-		}
-
+		// Apply deadband
 		utils_deadband(&servo_val, config.hyst, 1.0);
+
+		// Apply throttle curve
+		servo_val = utils_throttle_curve(servo_val, config.throttle_exp, config.throttle_exp_brake, config.throttle_exp_mode);
+
+		// Apply ramping
+		static systime_t last_time = 0;
+		static float servo_val_ramp = 0.0;
+		const float ramp_time = fabsf(servo_val) > fabsf(servo_val_ramp) ? config.ramp_time_pos : config.ramp_time_neg;
+
+		if (ramp_time > 0.01) {
+			const float ramp_step = (float)ST2MS(chVTTimeElapsedSinceX(last_time)) / (ramp_time * 1000.0);
+			utils_step_towards(&servo_val_ramp, servo_val, ramp_step);
+			last_time = chVTGetSystemTimeX();
+			servo_val = servo_val_ramp;
+		}
 
 		float current = 0;
 		bool current_mode = false;
 		bool current_mode_brake = false;
-		const volatile mc_configuration *mcconf = mc_interface_get_configuration();
-		bool send_duty = false;
+		bool send_current = false;
 
 		switch (config.ctrl_type) {
 		case PPM_CTRL_TYPE_CURRENT:
 		case PPM_CTRL_TYPE_CURRENT_NOREV:
 			current_mode = true;
-			if (servo_val >= 0.0) {
-				current = servo_val * mcconf->l_current_max;
+			if ((servo_val >= 0.0 && rpm_now > 0.0) || (servo_val < 0.0 && rpm_now < 0.0)) {
+				current = servo_val * mcconf->lo_current_motor_max_now;
 			} else {
-				current = servo_val * fabsf(mcconf->l_current_min);
+				current = servo_val * fabsf(mcconf->lo_current_motor_min_now);
 			}
 
 			if (fabsf(servo_val) < 0.001) {
@@ -156,9 +214,9 @@ static THD_FUNCTION(ppm_thread, arg) {
 		case PPM_CTRL_TYPE_CURRENT_NOREV_BRAKE:
 			current_mode = true;
 			if (servo_val >= 0.0) {
-				current = servo_val * mcconf->l_current_max;
+				current = servo_val * mcconf->lo_current_motor_max_now;
 			} else {
-				current = fabsf(servo_val * mcconf->l_current_min);
+				current = fabsf(servo_val * mcconf->lo_current_motor_min_now);
 				current_mode_brake = true;
 			}
 
@@ -175,7 +233,7 @@ static THD_FUNCTION(ppm_thread, arg) {
 
 			if (!(pulses_without_power < MIN_PULSES_WITHOUT_POWER && config.safe_start)) {
 				mc_interface_set_duty(utils_map(servo_val, -1.0, 1.0, -mcconf->l_max_duty, mcconf->l_max_duty));
-				send_duty = true;
+				send_current = true;
 			}
 			break;
 
@@ -187,7 +245,7 @@ static THD_FUNCTION(ppm_thread, arg) {
 
 			if (!(pulses_without_power < MIN_PULSES_WITHOUT_POWER && config.safe_start)) {
 				mc_interface_set_pid_speed(servo_val * config.pid_max_erpm);
-				send_duty = true;
+				send_current = true;
 			}
 			break;
 
@@ -222,14 +280,14 @@ static THD_FUNCTION(ppm_thread, arg) {
 			}
 		}
 
-		if (send_duty && config.multi_esc) {
-			float duty = mc_interface_get_duty_cycle_now();
+		if (send_current && config.multi_esc) {
+			float current = mc_interface_get_tot_current_directional_filtered();
 
 			for (int i = 0;i < CAN_STATUS_MSGS_TO_STORE;i++) {
 				can_status_msg *msg = comm_can_get_status_msg_index(i);
 
 				if (msg->id >= 0 && UTILS_AGE_S(msg->rx_time) < MAX_CAN_AGE) {
-					comm_can_set_duty(msg->id, duty);
+					comm_can_set_current(msg->id, current);
 				}
 			}
 		}
@@ -247,21 +305,6 @@ static THD_FUNCTION(ppm_thread, arg) {
 					}
 				}
 			} else {
-				// Apply soft RPM limit
-				if (rpm_lowest > config.rpm_lim_end && current > 0.0) {
-					current = mcconf->cc_min_current;
-				} else if (rpm_lowest > config.rpm_lim_start && current > 0.0) {
-					current = utils_map(rpm_lowest, config.rpm_lim_start, config.rpm_lim_end, current, mcconf->cc_min_current);
-				} else if (rpm_lowest < -config.rpm_lim_end && current < 0.0) {
-					current = mcconf->cc_min_current;
-				} else if (rpm_lowest < -config.rpm_lim_start && current < 0.0) {
-					rpm_lowest = -rpm_lowest;
-					current = -current;
-					current = utils_map(rpm_lowest, config.rpm_lim_start, config.rpm_lim_end, current, mcconf->cc_min_current);
-					current = -current;
-					rpm_lowest = -rpm_lowest;
-				}
-
 				float current_out = current;
 				bool is_reverse = false;
 				if (current_out < 0.0) {

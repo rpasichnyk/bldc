@@ -1,12 +1,14 @@
 /*
-	Copyright 2012-2015 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -43,6 +45,9 @@
 #include "servo.h"
 #include "servo_simple.h"
 #include "utils.h"
+#include "nrf_driver.h"
+#include "rfhelp.h"
+#include "spi_sw.h"
 
 /*
  * Timers used:
@@ -138,6 +143,26 @@ static THD_FUNCTION(periodic_thread, arg) {
 		}
 
 		chThdSleepMilliseconds(10);
+
+//		chThdSleepMilliseconds(40);
+//		volatile const mc_configuration *conf = mc_interface_get_configuration();
+//		float vq = mcpwm_foc_get_vq();
+//		float iq = mc_interface_get_tot_current_directional();
+//		float linkage = conf->foc_motor_flux_linkage;
+//		float speed = ((2.0 * M_PI) / 60.0) * mc_interface_get_rpm();
+//
+//		if (iq < -6.0) {
+//			float res = vq / (linkage * speed * iq);
+//			res *= 2.0 / 3.0;
+//			static float res_filtered = 0.0;
+//			UTILS_LP_FAST(res_filtered, res, 0.02);
+//			commands_printf("Res: %.4f", (double)res_filtered);
+//		}
+
+//		chThdSleepMilliseconds(40);
+//		commands_printf("Max: %.2f Min: %.2f",
+//				(double)mc_interface_get_configuration()->lo_current_motor_max_now,
+//				(double)mc_interface_get_configuration()->lo_current_motor_min_now);
 	}
 }
 
@@ -155,6 +180,13 @@ static THD_FUNCTION(timer_thread, arg) {
 int main(void) {
 	halInit();
 	chSysInit();
+
+	// Initialize the enable pins here and disable them
+	// to avoid excessive current draw at boot because of
+	// floating pins.
+#ifdef HW_HAS_DRV8313
+	INIT_BR();
+#endif
 
 	chThdSleepMilliseconds(1000);
 
@@ -174,7 +206,23 @@ int main(void) {
 
 	app_configuration appconf;
 	conf_general_read_app_configuration(&appconf);
-	app_init(&appconf);
+	app_set_configuration(&appconf);
+
+#ifdef HW_HAS_PERMANENT_NRF
+	conf_general_permanent_nrf_found = nrf_driver_init();
+	if (conf_general_permanent_nrf_found) {
+		rfhelp_restart();
+	} else {
+		nrf_driver_stop();
+		// Set the nrf SPI pins to the general SPI interface so that
+		// an external NRF can be used with the NRF app.
+		spi_sw_change_pins(
+				HW_SPI_PORT_NSS, HW_SPI_PIN_NSS,
+				HW_SPI_PORT_SCK, HW_SPI_PIN_SCK,
+				HW_SPI_PORT_MOSI, HW_SPI_PIN_MOSI,
+				HW_SPI_PORT_MISO, HW_SPI_PIN_MISO);
+	}
+#endif
 
 	timeout_init();
 	timeout_configure(appconf.timeout_msec, appconf.timeout_brake_current);
@@ -185,7 +233,9 @@ int main(void) {
 
 #if WS2811_ENABLE
 	ws2811_init();
+#if !WS2811_TEST
 	led_external_init();
+#endif
 #endif
 
 #if SERVO_OUT_ENABLE
@@ -199,6 +249,66 @@ int main(void) {
 	// Threads
 	chThdCreateStatic(periodic_thread_wa, sizeof(periodic_thread_wa), NORMALPRIO, periodic_thread, NULL);
 	chThdCreateStatic(timer_thread_wa, sizeof(timer_thread_wa), NORMALPRIO, timer_thread, NULL);
+
+#if WS2811_TEST
+	unsigned int color_ind = 0;
+	const int num = 4;
+	const uint32_t colors[] = {COLOR_RED, COLOR_GOLD, COLOR_GRAY, COLOR_MAGENTA, COLOR_BLUE};
+	const int brightness_set = 100;
+
+	for (;;) {
+		chThdSleepMilliseconds(1000);
+
+		for (int i = 0;i < brightness_set;i++) {
+			ws2811_set_brightness(i);
+			chThdSleepMilliseconds(10);
+		}
+
+		chThdSleepMilliseconds(1000);
+
+		for(int i = -num;i <= WS2811_LED_NUM;i++) {
+			ws2811_set_led_color(i - 1, COLOR_BLACK);
+			ws2811_set_led_color(i + num, colors[color_ind]);
+
+			ws2811_set_led_color(0, COLOR_RED);
+			ws2811_set_led_color(WS2811_LED_NUM - 1, COLOR_GREEN);
+
+			chThdSleepMilliseconds(50);
+		}
+
+		for (int i = 0;i < brightness_set;i++) {
+			ws2811_set_brightness(brightness_set - i);
+			chThdSleepMilliseconds(10);
+		}
+
+		color_ind++;
+		if (color_ind >= sizeof(colors) / sizeof(uint32_t)) {
+			color_ind = 0;
+		}
+
+		static int asd = 0;
+		asd++;
+		if (asd >= 3) {
+			asd = 0;
+
+			for (unsigned int i = 0;i < sizeof(colors) / sizeof(uint32_t);i++) {
+				ws2811_set_all(colors[i]);
+
+				for (int i = 0;i < brightness_set;i++) {
+					ws2811_set_brightness(i);
+					chThdSleepMilliseconds(2);
+				}
+
+				chThdSleepMilliseconds(100);
+
+				for (int i = 0;i < brightness_set;i++) {
+					ws2811_set_brightness(brightness_set - i);
+					chThdSleepMilliseconds(2);
+				}
+			}
+		}
+	}
+#endif
 
 	for(;;) {
 		chThdSleepMilliseconds(10);
