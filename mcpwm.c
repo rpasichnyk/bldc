@@ -1,26 +1,21 @@
 /*
-	Copyright 2012-2015 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
 
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
-
-/*
- * mcpwm.c
- *
- *  Created on: 13 okt 2012
- *      Author: benjamin
- */
+    */
 
 #include "ch.h"
 #include "hal.h"
@@ -34,7 +29,6 @@
 #include "digital_filter.h"
 #include "utils.h"
 #include "ledpwm.h"
-#include "hw.h"
 #include "terminal.h"
 #include "encoder.h"
 
@@ -46,6 +40,9 @@ typedef struct {
 	volatile unsigned int val_sample;
 	volatile unsigned int curr1_sample;
 	volatile unsigned int curr2_sample;
+#ifdef HW_HAS_3_SHUNTS
+	volatile unsigned int curr3_sample;
+#endif
 } mc_timer_struct;
 
 // Private variables
@@ -77,7 +74,6 @@ static volatile int ignore_iterations;
 static volatile mc_timer_struct timer_struct;
 static volatile int curr_samp_volt; // Use the voltage-synchronized samples for this current sample
 static int hall_to_phase_table[16];
-static volatile unsigned int cycles_running;
 static volatile unsigned int slow_ramping_cycles;
 static volatile int has_commutated;
 static volatile mc_rpm_dep_struct rpm_dep;
@@ -91,6 +87,13 @@ static volatile float last_pwm_cycles_sums[6];
 static volatile bool dccal_done;
 static volatile bool sensorless_now;
 static volatile int hall_detect_table[8][7];
+static volatile bool init_done;
+static volatile mc_comm_mode comm_mode_next;
+
+#ifdef HW_HAS_3_SHUNTS
+static volatile int curr2_sum;
+static volatile int curr2_offset;
+#endif
 
 // KV FIR filter
 #define KV_FIR_TAPS_BITS		7
@@ -160,6 +163,8 @@ static volatile bool rpm_thd_stop;
 void mcpwm_init(volatile mc_configuration *configuration) {
 	utils_sys_lock_cnt();
 
+	init_done= false;
+
 	TIM_TimeBaseInitTypeDef  TIM_TimeBaseStructure;
 	TIM_OCInitTypeDef  TIM_OCInitStructure;
 	TIM_BDTRInitTypeDef TIM_BDTRInitStructure;
@@ -183,10 +188,9 @@ void mcpwm_init(volatile mc_configuration *configuration) {
 	control_mode = CONTROL_MODE_NONE;
 	last_current_sample = 0.0;
 	last_current_sample_filtered = 0.0;
-	switching_frequency_now = MCPWM_SWITCH_FREQUENCY_MAX;
+	switching_frequency_now = conf->m_bldc_f_sw_max;
 	ignore_iterations = 0;
 	curr_samp_volt = 0;
-	cycles_running = 0;
 	slow_ramping_cycles = 0;
 	has_commutated = 0;
 	memset((void*)&rpm_dep, 0, sizeof(rpm_dep));
@@ -197,8 +201,9 @@ void mcpwm_init(volatile mc_configuration *configuration) {
 	last_pwm_cycles_sum = 0.0;
 	memset((float*)last_pwm_cycles_sums, 0, sizeof(last_pwm_cycles_sums));
 	dccal_done = false;
-	memset(hall_detect_table, 0, sizeof(hall_detect_table[0][0]) * 8 * 7);
+	memset((void*)hall_detect_table, 0, sizeof(hall_detect_table[0][0]) * 8 * 7);
 	update_sensor_mode();
+	comm_mode_next = conf->comm_mode;
 
 	mcpwm_init_hall_table((int8_t*)conf->hall_table);
 
@@ -252,7 +257,7 @@ void mcpwm_init(volatile mc_configuration *configuration) {
 	TIM_BDTRInitStructure.TIM_OSSRState = TIM_OSSRState_Enable;
 	TIM_BDTRInitStructure.TIM_OSSIState = TIM_OSSIState_Enable;
 	TIM_BDTRInitStructure.TIM_LOCKLevel = TIM_LOCKLevel_OFF;
-	TIM_BDTRInitStructure.TIM_DeadTime = MCPWM_DEAD_TIME_CYCLES;
+	TIM_BDTRInitStructure.TIM_DeadTime = HW_DEAD_TIME_VALUE;
 	TIM_BDTRInitStructure.TIM_Break = TIM_Break_Disable;
 	TIM_BDTRInitStructure.TIM_BreakPolarity = TIM_BreakPolarity_High;
 	TIM_BDTRInitStructure.TIM_AutomaticOutput = TIM_AutomaticOutput_Disable;
@@ -334,10 +339,19 @@ void mcpwm_init(volatile mc_configuration *configuration) {
 	// Injected channels for current measurement at end of cycle
 	ADC_ExternalTrigInjectedConvConfig(ADC1, ADC_ExternalTrigInjecConv_T1_CC4);
 	ADC_ExternalTrigInjectedConvConfig(ADC2, ADC_ExternalTrigInjecConv_T8_CC2);
+#ifdef HW_HAS_3_SHUNTS
+	ADC_ExternalTrigInjectedConvConfig(ADC3, ADC_ExternalTrigInjecConv_T8_CC3);
+#endif
 	ADC_ExternalTrigInjectedConvEdgeConfig(ADC1, ADC_ExternalTrigInjecConvEdge_Falling);
 	ADC_ExternalTrigInjectedConvEdgeConfig(ADC2, ADC_ExternalTrigInjecConvEdge_Falling);
-	ADC_InjectedSequencerLengthConfig(ADC1, 2);
-	ADC_InjectedSequencerLengthConfig(ADC2, 2);
+#ifdef HW_HAS_3_SHUNTS
+	ADC_ExternalTrigInjectedConvEdgeConfig(ADC3, ADC_ExternalTrigInjecConvEdge_Falling);
+#endif
+	ADC_InjectedSequencerLengthConfig(ADC1, HW_ADC_INJ_CHANNELS);
+	ADC_InjectedSequencerLengthConfig(ADC2, HW_ADC_INJ_CHANNELS);
+#ifdef HW_HAS_3_SHUNTS
+	ADC_InjectedSequencerLengthConfig(ADC3, HW_ADC_INJ_CHANNELS);
+#endif
 
 	hw_setup_adc_channels();
 
@@ -376,6 +390,8 @@ void mcpwm_init(volatile mc_configuration *configuration) {
 	TIM_OC1PreloadConfig(TIM8, TIM_OCPreload_Enable);
 	TIM_OC2Init(TIM8, &TIM_OCInitStructure);
 	TIM_OC2PreloadConfig(TIM8, TIM_OCPreload_Enable);
+	TIM_OC3Init(TIM8, &TIM_OCInitStructure);
+	TIM_OC3PreloadConfig(TIM8, TIM_OCPreload_Enable);
 
 	TIM_ARRPreloadConfig(TIM8, ENABLE);
 	TIM_CCPreloadControl(TIM8, ENABLE);
@@ -453,9 +469,13 @@ void mcpwm_init(volatile mc_configuration *configuration) {
 	// Reset tachometers again
 	tachometer = 0;
 	tachometer_abs = 0;
+
+	init_done = true;
 }
 
 void mcpwm_deinit(void) {
+	init_done = false;
+
 	WWDG_DeInit();
 
 	timer_thd_stop = true;
@@ -475,6 +495,10 @@ void mcpwm_deinit(void) {
 	dmaStreamRelease(STM32_DMA_STREAM(STM32_DMA_STREAM_ID(2, 4)));
 }
 
+bool mcpwm_init_done(void) {
+	return init_done;
+}
+
 void mcpwm_set_configuration(volatile mc_configuration *configuration) {
 	// Stop everything first to be safe
 	control_mode = CONTROL_MODE_NONE;
@@ -482,6 +506,7 @@ void mcpwm_set_configuration(volatile mc_configuration *configuration) {
 
 	utils_sys_lock_cnt();
 	conf = configuration;
+	comm_mode_next = conf->comm_mode;
 	mcpwm_init_hall_table((int8_t*)conf->hall_table);
 	update_sensor_mode();
 	utils_sys_unlock_cnt();
@@ -511,14 +536,34 @@ void mcpwm_init_hall_table(int8_t *table) {
 
 static void do_dc_cal(void) {
 	DCCAL_ON();
-	while(IS_DRV_FAULT()){};
+
+	// Wait max 5 seconds
+	int cnt = 0;
+	while(IS_DRV_FAULT()){
+		chThdSleepMilliseconds(1);
+		cnt++;
+		if (cnt > 5000) {
+			break;
+		}
+	};
+
 	chThdSleepMilliseconds(1000);
 	curr0_sum = 0;
 	curr1_sum = 0;
+
+#ifdef HW_HAS_3_SHUNTS
+	curr2_sum = 0;
+#endif
+
 	curr_start_samples = 0;
 	while(curr_start_samples < 4000) {};
 	curr0_offset = curr0_sum / curr_start_samples;
 	curr1_offset = curr1_sum / curr_start_samples;
+
+#ifdef HW_HAS_3_SHUNTS
+	curr2_offset = curr2_sum / curr_start_samples;
+#endif
+
 	DCCAL_OFF();
 	dccal_done = true;
 }
@@ -600,7 +645,7 @@ void mcpwm_set_current(float current) {
 		return;
 	}
 
-	utils_truncate_number(&current, conf->lo_current_min, conf->lo_current_max);
+	utils_truncate_number(&current, -conf->l_current_max, conf->l_current_max);
 
 	control_mode = CONTROL_MODE_CURRENT;
 	current_set = current;
@@ -624,7 +669,7 @@ void mcpwm_set_brake_current(float current) {
 		return;
 	}
 
-	utils_truncate_number(&current, -fabsf(conf->lo_current_min), fabsf(conf->lo_current_min));
+	utils_truncate_number(&current, -fabsf(conf->l_current_min), fabsf(conf->l_current_min));
 
 	control_mode = CONTROL_MODE_CURRENT_BRAKE;
 	current_set = current;
@@ -843,6 +888,10 @@ static void stop_pwm_ll(void) {
 }
 
 static void stop_pwm_hw(void) {
+#ifdef HW_HAS_DRV8313
+	DISABLE_BR();
+#endif
+
 	TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_ForcedAction_InActive);
 	TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
 	TIM_CCxNCmd(TIM1, TIM_Channel_1, TIM_CCxN_Disable);
@@ -857,7 +906,7 @@ static void stop_pwm_hw(void) {
 
 	TIM_GenerateEvent(TIM1, TIM_EventSource_COM);
 
-	set_switching_frequency(MCPWM_SWITCH_FREQUENCY_MAX);
+	set_switching_frequency(conf->m_bldc_f_sw_max);
 }
 
 static void full_brake_ll(void) {
@@ -867,6 +916,10 @@ static void full_brake_ll(void) {
 }
 
 static void full_brake_hw(void) {
+#ifdef HW_HAS_DRV8313
+	ENABLE_BR();
+#endif
+
 	TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_ForcedAction_InActive);
 	TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
 	TIM_CCxNCmd(TIM1, TIM_Channel_1, TIM_CCxN_Enable);
@@ -881,7 +934,7 @@ static void full_brake_hw(void) {
 
 	TIM_GenerateEvent(TIM1, TIM_EventSource_COM);
 
-	set_switching_frequency(MCPWM_SWITCH_FREQUENCY_MAX);
+	set_switching_frequency(conf->m_bldc_f_sw_max);
 }
 
 /**
@@ -955,7 +1008,13 @@ static void set_duty_cycle_ll(float dutyCycle) {
 
 	if (dutyCycle < conf->l_min_duty) {
 		float max_erpm_fbrake;
+#if BLDC_SPEED_CONTROL_CURRENT
+		if (control_mode == CONTROL_MODE_CURRENT ||
+				control_mode == CONTROL_MODE_CURRENT_BRAKE ||
+				control_mode == CONTROL_MODE_SPEED) {
+#else
 		if (control_mode == CONTROL_MODE_CURRENT || control_mode == CONTROL_MODE_CURRENT_BRAKE) {
+#endif
 			max_erpm_fbrake = conf->l_max_erpm_fbrake_cc;
 		} else {
 			max_erpm_fbrake = conf->l_max_erpm_fbrake;
@@ -1034,6 +1093,19 @@ static void set_duty_cycle_hw(float dutyCycle) {
 
 	utils_truncate_number(&dutyCycle, conf->l_min_duty, conf->l_max_duty);
 
+	if (conf->motor_type == MOTOR_TYPE_DC) {
+		switching_frequency_now = conf->m_dc_f_sw;
+	} else {
+		if (IS_DETECTING() || conf->pwm_mode == PWM_MODE_BIPOLAR) {
+			switching_frequency_now = conf->m_bldc_f_sw_max;
+		} else {
+			switching_frequency_now = (float)conf->m_bldc_f_sw_min * (1.0 - fabsf(dutyCycle)) +
+					conf->m_bldc_f_sw_max * fabsf(dutyCycle);
+		}
+	}
+
+	timer_tmp.top = SYSTEM_CORE_CLOCK / (int)switching_frequency_now;
+
 	if (conf->motor_type == MOTOR_TYPE_BLDC && conf->pwm_mode == PWM_MODE_BIPOLAR && !IS_DETECTING()) {
 		timer_tmp.duty = (uint16_t) (((float) timer_tmp.top / 2.0) * dutyCycle
 				+ ((float) timer_tmp.top / 2.0));
@@ -1041,18 +1113,6 @@ static void set_duty_cycle_hw(float dutyCycle) {
 		timer_tmp.duty = (uint16_t)((float)timer_tmp.top * dutyCycle);
 	}
 
-	if (conf->motor_type == MOTOR_TYPE_DC) {
-		switching_frequency_now = MCPWM_SWITCH_FREQUENCY_DC_MOTOR;
-	} else {
-		if (IS_DETECTING() || conf->pwm_mode == PWM_MODE_BIPOLAR) {
-			switching_frequency_now = MCPWM_SWITCH_FREQUENCY_MAX;
-		} else {
-			switching_frequency_now = (float)MCPWM_SWITCH_FREQUENCY_MIN * (1.0 - fabsf(dutyCycle)) +
-					(float)MCPWM_SWITCH_FREQUENCY_MAX * fabsf(dutyCycle);
-		}
-	}
-
-	timer_tmp.top = SYSTEM_CORE_CLOCK / (int)switching_frequency_now;
 	update_adc_sample_pos(&timer_tmp);
 	set_next_timer_settings(&timer_tmp);
 }
@@ -1065,24 +1125,66 @@ static void run_pid_control_speed(void) {
 
 	// PID is off. Return.
 	if (control_mode != CONTROL_MODE_SPEED) {
+#if BLDC_SPEED_CONTROL_CURRENT
+		i_term = 0.0;
+#else
 		i_term = dutycycle_now;
-		prev_error = 0;
+#endif
+		prev_error = 0.0;
 		return;
 	}
+
+	const float rpm = mcpwm_get_rpm();
+	float error = speed_pid_set_rpm - rpm;
 
 	// Too low RPM set. Stop and return.
 	if (fabsf(speed_pid_set_rpm) < conf->s_pid_min_erpm) {
 		i_term = dutycycle_now;
-		prev_error = 0;
+		prev_error = error;
 		mcpwm_set_duty(0.0);
 		return;
 	}
 
+#if BLDC_SPEED_CONTROL_CURRENT
+	// Compute parameters
+	p_term = error * conf->s_pid_kp * (1.0 / 20.0);
+	i_term += error * (conf->s_pid_ki * MCPWM_PID_TIME_K) * (1.0 / 20.0);
+	d_term = (error - prev_error) * (conf->s_pid_kd / MCPWM_PID_TIME_K) * (1.0 / 20.0);
+
+	// I-term wind-up protection
+	utils_truncate_number(&i_term, -1.0, 1.0);
+
+	// Store previous error
+	prev_error = error;
+
+	// Some d_term filtering
+	static float d_filtered = 0.0;
+	UTILS_LP_FAST(d_filtered, d_term, 0.1);
+	d_term = d_filtered;
+
+	// Calculate output
+	float output = p_term + i_term + d_term;
+	utils_truncate_number(&output, -1.0, 1.0);
+
+	// Optionally disable braking
+	if (!conf->s_pid_allow_braking) {
+		if (rpm > 0.0 && output < 0.0) {
+			output = 0.0;
+		}
+
+		if (rpm < 0.0 && output > 0.0) {
+			output = 0.0;
+		}
+	}
+
+	current_set = output * conf->lo_current_max;
+
+	if (state != MC_STATE_RUNNING) {
+		set_duty_cycle_hl(SIGN(output) * conf->l_min_duty);
+	}
+#else
 	// Compensation for supply voltage variations
 	float scale = 1.0 / GET_INPUT_VOLTAGE();
-
-	// Compute error
-	float error = speed_pid_set_rpm - mcpwm_get_rpm();
 
 	// Compute parameters
 	p_term = error * conf->s_pid_kp * scale;
@@ -1113,6 +1215,7 @@ static void run_pid_control_speed(void) {
 	}
 
 	set_duty_cycle_hl(output);
+#endif
 }
 
 static void run_pid_control_pos(float dt) {
@@ -1179,9 +1282,9 @@ static THD_FUNCTION(rpm_thread, arg) {
 		}
 
 		// Some low-pass filtering
-		static float rpm_p1 = 0.0;
-		rpm_now = (rpm_now + rpm_p1) / 2;
-		rpm_p1 = rpm_now;
+		static float rpm_filtered = 0.0;
+		UTILS_LP_FAST(rpm_filtered, rpm_now, 0.1);
+		rpm_now = rpm_filtered;
 		const float rpm_abs = fabsf(rpm_now);
 
 		// Update the cycle integrator limit
@@ -1202,8 +1305,8 @@ static THD_FUNCTION(rpm_thread, arg) {
 			rpm_dep.cycle_int_limit_running = rpm_dep.cycle_int_limit_max;
 		}
 
-		rpm_dep.comm_time_sum = ((float) MCPWM_SWITCH_FREQUENCY_MAX) / ((rpm_abs / 60.0) * 6.0);
-		rpm_dep.comm_time_sum_min_rpm = ((float) MCPWM_SWITCH_FREQUENCY_MAX) / ((conf->sl_min_erpm / 60.0) * 6.0);
+		rpm_dep.comm_time_sum = conf->m_bldc_f_sw_max / ((rpm_abs / 60.0) * 6.0);
+		rpm_dep.comm_time_sum_min_rpm = conf->m_bldc_f_sw_max / ((conf->sl_min_erpm / 60.0) * 6.0);
 
 		run_pid_control_speed();
 
@@ -1330,33 +1433,49 @@ void mcpwm_adc_inj_int_handler(void) {
 	int curr0_2 = ADC_GetInjectedConversionValue(ADC2, ADC_InjectedChannel_2);
 	int curr1_2 = ADC_GetInjectedConversionValue(ADC1, ADC_InjectedChannel_2);
 
+#ifdef HW_HAS_3_SHUNTS
+	int curr2 = ADC_GetInjectedConversionValue(ADC3, ADC_InjectedChannel_1);
+#endif
+
 	float curr0_currsamp = curr0;
 	float curr1_currsamp = curr1;
+#ifdef HW_HAS_3_SHUNTS
+	float curr2_currsamp = curr2;
+#endif
 
-	if (curr_samp_volt == 1) {
+	if (curr_samp_volt & (1 << 0)) {
 		curr0 = ADC_Value[ADC_IND_CURR1];
-	} else if (curr_samp_volt == 2) {
-		curr1 = ADC_Value[ADC_IND_CURR2];
-	} else if (curr_samp_volt == 3) {
-		curr0 = ADC_Value[ADC_IND_CURR1];
+	}
+
+	if (curr_samp_volt & (1 << 1)) {
 		curr1 = ADC_Value[ADC_IND_CURR2];
 	}
 
+#ifdef HW_HAS_3_SHUNTS
+	if (curr_samp_volt & (1 << 2)) {
+		curr2 = ADC_Value[ADC_IND_CURR3];
+	}
+#endif
+
 	// DCCal every other cycle
-//	static bool sample_ofs = true;
-//	if (sample_ofs) {
-//		sample_ofs = false;
-//		curr0_offset = curr0;
-//		curr1_offset = curr1;
-//		DCCAL_OFF();
-//		return;
-//	} else {
-//		sample_ofs = true;
-//		DCCAL_ON();
-//	}
+	//	static bool sample_ofs = true;
+	//	if (sample_ofs) {
+	//		sample_ofs = false;
+	//		curr0_offset = curr0;
+	//		curr1_offset = curr1;
+	//		DCCAL_OFF();
+	//		return;
+	//	} else {
+	//		sample_ofs = true;
+	//		DCCAL_ON();
+	//	}
 
 	curr0_sum += curr0;
 	curr1_sum += curr1;
+#ifdef HW_HAS_3_SHUNTS
+	curr2_sum += curr2;
+#endif
+
 	curr_start_samples++;
 
 	curr0_currsamp -= curr0_offset;
@@ -1365,6 +1484,11 @@ void mcpwm_adc_inj_int_handler(void) {
 	curr1 -= curr1_offset;
 	curr0_2 -= curr0_offset;
 	curr1_2 -= curr1_offset;
+
+#ifdef HW_HAS_3_SHUNTS
+	curr2_currsamp -= curr2_offset;
+	curr2 -= curr2_offset;
+#endif
 
 #if CURR1_DOUBLE_SAMPLE || CURR2_DOUBLE_SAMPLE
 	if (conf->pwm_mode != PWM_MODE_BIPOLAR && conf->motor_type == MOTOR_TYPE_BLDC) {
@@ -1386,12 +1510,21 @@ void mcpwm_adc_inj_int_handler(void) {
 
 	ADC_curr_norm_value[0] = curr0;
 	ADC_curr_norm_value[1] = curr1;
+
+#ifdef HW_HAS_3_SHUNTS
+	ADC_curr_norm_value[2] = curr2;
+#else
 	ADC_curr_norm_value[2] = -(ADC_curr_norm_value[0] + ADC_curr_norm_value[1]);
+#endif
 
 	float curr_tot_sample = 0;
 	if (conf->motor_type == MOTOR_TYPE_DC) {
 		if (direction) {
+#ifdef HW_HAS_3_SHUNTS
+			curr_tot_sample = -(float)(ADC_Value[ADC_IND_CURR3] - curr2_offset);
+#else
 			curr_tot_sample = -(float)(ADC_Value[ADC_IND_CURR2] - curr1_offset);
+#endif
 		} else {
 			curr_tot_sample = -(float)(ADC_Value[ADC_IND_CURR1] - curr0_offset);
 		}
@@ -1424,6 +1557,29 @@ void mcpwm_adc_inj_int_handler(void) {
 			float c2 = (float)ADC_curr_norm_value[2];
 			curr_tot_sample = sqrtf((c0*c0 + c1*c1 + c2*c2) / 1.5);
 		} else {
+#ifdef HW_HAS_3_SHUNTS
+			if (direction) {
+				switch (comm_step) {
+				case 1: curr_tot_sample = -(float)ADC_curr_norm_value[2]; break;
+				case 2: curr_tot_sample = -(float)ADC_curr_norm_value[2]; break;
+				case 3: curr_tot_sample = -(float)ADC_curr_norm_value[1]; break;
+				case 4: curr_tot_sample = -(float)ADC_curr_norm_value[1]; break;
+				case 5: curr_tot_sample = -(float)ADC_curr_norm_value[0]; break;
+				case 6: curr_tot_sample = -(float)ADC_curr_norm_value[0]; break;
+				default: break;
+				}
+			} else {
+				switch (comm_step) {
+				case 1: curr_tot_sample = -(float)ADC_curr_norm_value[1]; break;
+				case 2: curr_tot_sample = -(float)ADC_curr_norm_value[1]; break;
+				case 3: curr_tot_sample = -(float)ADC_curr_norm_value[2]; break;
+				case 4: curr_tot_sample = -(float)ADC_curr_norm_value[2]; break;
+				case 5: curr_tot_sample = -(float)ADC_curr_norm_value[0]; break;
+				case 6: curr_tot_sample = -(float)ADC_curr_norm_value[0]; break;
+				default: break;
+				}
+			}
+#else
 			if (direction) {
 				switch (comm_step) {
 				case 1: curr_tot_sample = -(float)ADC_curr_norm_value[1]; break;
@@ -1445,6 +1601,7 @@ void mcpwm_adc_inj_int_handler(void) {
 				default: break;
 				}
 			}
+#endif
 
 			const float tot_sample_tmp = curr_tot_sample;
 			static int comm_step_prev = 1;
@@ -1475,7 +1632,7 @@ void mcpwm_adc_inj_int_handler(void) {
 			}
 
 			const int vzero = ADC_V_ZERO;
-//			const int vzero = (ADC_V_L1 + ADC_V_L2 + ADC_V_L3) / 3;
+			//			const int vzero = (ADC_V_L1 + ADC_V_L2 + ADC_V_L3) / 3;
 
 			switch (comm_step) {
 			case 1:
@@ -1524,7 +1681,7 @@ void mcpwm_adc_inj_int_handler(void) {
 		}
 	}
 
-	last_current_sample = curr_tot_sample * (V_REG / 4095.0) / (CURRENT_SHUNT_RES * CURRENT_AMP_GAIN);
+	last_current_sample = curr_tot_sample * FAC_CURRENT;
 
 	// Filter out outliers
 	if (fabsf(last_current_sample) > (conf->l_abs_current_max * 1.2)) {
@@ -1560,10 +1717,7 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 	int ph1_raw, ph2_raw, ph3_raw;
 
 	static int direction_before = 1;
-	if (state == MC_STATE_RUNNING && direction == direction_before) {
-		cycles_running++;
-	} else {
-		cycles_running = 0;
+	if (!(state == MC_STATE_RUNNING && direction == direction_before)) {
 		has_commutated = 0;
 	}
 	direction_before = direction;
@@ -1675,7 +1829,7 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 
 				if (v_diff > 0) {
 					// TODO!
-//					const int min = 100;
+					//					const int min = 100;
 					int min = (int)((1.0 - fabsf(dutycycle_now)) * (float)ADC_Value[ADC_IND_VIN_SENS] * 0.3);
 					if (min > ADC_Value[ADC_IND_VIN_SENS] / 4) {
 						min = ADC_Value[ADC_IND_VIN_SENS] / 4;
@@ -1687,6 +1841,7 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 					}
 				}
 
+				static float cycle_sum = 0.0;
 				if (conf->comm_mode == COMM_MODE_INTEGRATE) {
 					float limit;
 					if (has_commutated) {
@@ -1699,11 +1854,11 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 							cycle_integrator >= limit) {
 						commutate(1);
 						cycle_integrator = 0.0;
+						cycle_sum = 0.0;
 					}
 				} else if (conf->comm_mode == COMM_MODE_DELAY) {
-					static float cycle_sum = 0.0;
 					if (v_diff > 0) {
-						cycle_sum += (float)MCPWM_SWITCH_FREQUENCY_MAX / switching_frequency_now;
+						cycle_sum += conf->m_bldc_f_sw_max / switching_frequency_now;
 
 						if (cycle_sum >= utils_map(fabsf(rpm_now), 0,
 								conf->sl_cycle_int_rpm_br, rpm_dep.comm_time_sum / 2.0,
@@ -1723,7 +1878,7 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 				cycle_integrator = 0.0;
 			}
 
-			pwm_cycles_sum += (float)MCPWM_SWITCH_FREQUENCY_MAX / switching_frequency_now;
+			pwm_cycles_sum += conf->m_bldc_f_sw_max / switching_frequency_now;
 			pwm_cycles++;
 		} else {
 			const int hall_phase = mcpwm_read_hall_phase();
@@ -1760,7 +1915,6 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 		}
 	}
 
-	const float current = mcpwm_get_tot_current_filtered();
 	const float current_nofilter = mcpwm_get_tot_current();
 	const float current_in_nofilter = current_nofilter * fabsf(dutycycle_now);
 
@@ -1778,7 +1932,13 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 
 		float dutycycle_now_tmp = dutycycle_now;
 
+#if BLDC_SPEED_CONTROL_CURRENT
+		if (control_mode == CONTROL_MODE_CURRENT ||
+				control_mode == CONTROL_MODE_POS ||
+				control_mode == CONTROL_MODE_SPEED) {
+#else
 		if (control_mode == CONTROL_MODE_CURRENT || control_mode == CONTROL_MODE_POS) {
+#endif
 			// Compute error
 			const float error = current_set - (direction ? current_nofilter : -current_nofilter);
 			float step = error * conf->cc_gain * voltage_scale;
@@ -1874,18 +2034,6 @@ void mcpwm_adc_int_handler(void *p, uint32_t flags) {
 			utils_step_towards((float*) &dutycycle_now, direction ? conf->l_max_duty : -conf->l_max_duty,
 					ramp_step_no_lim * fabsf(current_in_nofilter - conf->lo_in_current_min) * conf->m_current_backoff_gain);
 			limit_delay = 1;
-		} else if (rpm > conf->l_max_erpm) {
-			if ((conf->l_rpm_lim_neg_torque || current > -1.0) && dutycycle_now <= dutycycle_now_tmp) {
-				utils_step_towards((float*) &dutycycle_now, 0.0, conf->m_duty_ramp_step_rpm_lim);
-				limit_delay = 1;
-				slow_ramping_cycles = 500;
-			}
-		} else if (rpm < conf->l_min_erpm) {
-			if ((conf->l_rpm_lim_neg_torque || current > -1.0) && dutycycle_now >= dutycycle_now_tmp) {
-				utils_step_towards((float*) &dutycycle_now, 0.0, conf->m_duty_ramp_step_rpm_lim);
-				limit_delay = 1;
-				slow_ramping_cycles = 500;
-			}
 		}
 
 		if (limit_delay > 0) {
@@ -1931,7 +2079,7 @@ void mcpwm_set_detect(void) {
 	control_mode = CONTROL_MODE_NONE;
 	stop_pwm_hw();
 
-	set_switching_frequency(MCPWM_SWITCH_FREQUENCY_MAX);
+	set_switching_frequency(conf->m_bldc_f_sw_max);
 
 	for(int i = 0;i < 6;i++) {
 		mcpwm_detect_currents[i] = 0;
@@ -2023,11 +2171,15 @@ bool mcpwm_is_dccal_done(void) {
 	return dccal_done;
 }
 
+void mcpwm_switch_comm_mode(mc_comm_mode next) {
+	comm_mode_next = next;
+}
+
 /**
  * Reset the hall sensor detection table
  */
 void mcpwm_reset_hall_detect_table(void) {
-	memset(hall_detect_table, 0, sizeof(hall_detect_table[0][0]) * 8 * 7);
+	memset((void*)hall_detect_table, 0, sizeof(hall_detect_table[0][0]) * 8 * 7);
 }
 
 /**
@@ -2124,6 +2276,10 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 	volatile uint32_t curr1_sample = timer_tmp->curr1_sample;
 	volatile uint32_t curr2_sample = timer_tmp->curr2_sample;
 
+#ifdef HW_HAS_3_SHUNTS
+	volatile uint32_t curr3_sample = timer_tmp->curr3_sample;
+#endif
+
 	if (duty > (uint32_t)((float)top * conf->l_max_duty)) {
 		duty = (uint32_t)((float)top * conf->l_max_duty);
 	}
@@ -2133,19 +2289,22 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 	if (conf->motor_type == MOTOR_TYPE_DC) {
 		curr1_sample = top - 10; // Not used anyway
 		curr2_sample = top - 10;
+#ifdef HW_HAS_3_SHUNTS
+		curr3_sample = top - 10;
+#endif
 
 		if (duty > 1000) {
 			val_sample = duty / 2;
 		} else {
 			val_sample = duty + 800;
-			curr_samp_volt = 1;
+			curr_samp_volt = (1 << 0) || (1 << 1) || (1 << 2);
 		}
 
-//		if (duty < (top / 2)) {
-//			val_sample = (top - duty) / 2 + duty;
-//		} else {
-//			val_sample = duty / 2;
-//		}
+		//		if (duty < (top / 2)) {
+		//			val_sample = (top - duty) / 2 + duty;
+		//		} else {
+		//			val_sample = duty / 2;
+		//		}
 	} else {
 		// Sample the ADC at an appropriate time during the pwm cycle
 		if (IS_DETECTING()) {
@@ -2155,6 +2314,9 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 			// Current samples
 			curr1_sample = (top - duty) / 2 + duty;
 			curr2_sample = (top - duty) / 2 + duty;
+#ifdef HW_HAS_3_SHUNTS
+			curr3_sample = (top - duty) / 2 + duty;
+#endif
 		} else {
 			if (conf->pwm_mode == PWM_MODE_BIPOLAR) {
 				uint32_t samp_neg = top - 2;
@@ -2165,12 +2327,17 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 				val_sample = top / 4;
 
 				// Current sampling
+				// TODO: Adapt for 3 shunts
+#ifdef HW_HAS_3_SHUNTS
+				curr3_sample = samp_zero;
+#endif
+
 				switch (comm_step) {
 				case 1:
 					if (direction) {
 						curr1_sample = samp_zero;
 						curr2_sample = samp_neg;
-						curr_samp_volt = 2;
+						curr_samp_volt = (1 << 1);
 					} else {
 						curr1_sample = samp_zero;
 						curr2_sample = samp_pos;
@@ -2181,7 +2348,7 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 					if (direction) {
 						curr1_sample = samp_pos;
 						curr2_sample = samp_neg;
-						curr_samp_volt = 2;
+						curr_samp_volt = (1 << 1);
 					} else {
 						curr1_sample = samp_pos;
 						curr2_sample = samp_zero;
@@ -2195,7 +2362,7 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 					} else {
 						curr1_sample = samp_pos;
 						curr2_sample = samp_neg;
-						curr_samp_volt = 2;
+						curr_samp_volt = (1 << 1);
 					}
 					break;
 
@@ -2206,7 +2373,7 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 					} else {
 						curr1_sample = samp_zero;
 						curr2_sample = samp_neg;
-						curr_samp_volt = 2;
+						curr_samp_volt = (1 << 1);
 					}
 					break;
 
@@ -2214,11 +2381,11 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 					if (direction) {
 						curr1_sample = samp_neg;
 						curr2_sample = samp_pos;
-						curr_samp_volt = 1;
+						curr_samp_volt = (1 << 0);
 					} else {
 						curr1_sample = samp_neg;
 						curr2_sample = samp_zero;
-						curr_samp_volt = 1;
+						curr_samp_volt = (1 << 0);
 					}
 					break;
 
@@ -2226,11 +2393,11 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 					if (direction) {
 						curr1_sample = samp_neg;
 						curr2_sample = samp_zero;
-						curr_samp_volt = 1;
+						curr_samp_volt = (1 << 0);
 					} else {
 						curr1_sample = samp_neg;
 						curr2_sample = samp_pos;
-						curr_samp_volt = 1;
+						curr_samp_volt = (1 << 0);
 					}
 					break;
 				}
@@ -2245,6 +2412,9 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 				}
 
 				curr2_sample = curr1_sample;
+#ifdef HW_HAS_3_SHUNTS
+				curr3_sample = curr1_sample;
+#endif
 
 				// The off sampling time is short, so use the on sampling time
 				// where possible
@@ -2270,27 +2440,51 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 					}
 #endif
 
+#ifdef HW_HAS_3_SHUNTS
 					if (direction) {
 						switch (comm_step) {
-						case 1: curr_samp_volt = 3; break;
-						case 2: curr_samp_volt = 2; break;
-						case 3: curr_samp_volt = 2; break;
-						case 4: curr_samp_volt = 1; break;
-						case 5: curr_samp_volt = 1; break;
-						case 6: curr_samp_volt = 3; break;
+						case 1: curr_samp_volt = (1 << 0) || (1 << 2); break;
+						case 2: curr_samp_volt = (1 << 1) || (1 << 2); break;
+						case 3: curr_samp_volt = (1 << 1) || (1 << 2); break;
+						case 4: curr_samp_volt = (1 << 0) || (1 << 1); break;
+						case 5: curr_samp_volt = (1 << 0) || (1 << 1); break;
+						case 6: curr_samp_volt = (1 << 0) || (1 << 2); break;
 						default: break;
 						}
 					} else {
 						switch (comm_step) {
-						case 1: curr_samp_volt = 1; break;
-						case 2: curr_samp_volt = 2; break;
-						case 3: curr_samp_volt = 2; break;
-						case 4: curr_samp_volt = 3; break;
-						case 5: curr_samp_volt = 3; break;
-						case 6: curr_samp_volt = 1; break;
+						case 1: curr_samp_volt = (1 << 0) || (1 << 1); break;
+						case 2: curr_samp_volt = (1 << 1) || (1 << 2); break;
+						case 3: curr_samp_volt = (1 << 1) || (1 << 2); break;
+						case 4: curr_samp_volt = (1 << 0) || (1 << 2); break;
+						case 5: curr_samp_volt = (1 << 0) || (1 << 2); break;
+						case 6: curr_samp_volt = (1 << 0) || (1 << 1); break;
 						default: break;
 						}
 					}
+#else
+					if (direction) {
+						switch (comm_step) {
+						case 1: curr_samp_volt = (1 << 0) || (1 << 1); break;
+						case 2: curr_samp_volt = (1 << 1); break;
+						case 3: curr_samp_volt = (1 << 1); break;
+						case 4: curr_samp_volt = (1 << 0); break;
+						case 5: curr_samp_volt = (1 << 0); break;
+						case 6: curr_samp_volt = (1 << 0) || (1 << 1); break;
+						default: break;
+						}
+					} else {
+						switch (comm_step) {
+						case 1: curr_samp_volt = (1 << 0); break;
+						case 2: curr_samp_volt = (1 << 1); break;
+						case 3: curr_samp_volt = (1 << 1); break;
+						case 4: curr_samp_volt = (1 << 0) || (1 << 1); break;
+						case 5: curr_samp_volt = (1 << 0) || (1 << 1); break;
+						case 6: curr_samp_volt = (1 << 0); break;
+						default: break;
+						}
+					}
+#endif
 				}
 			}
 		}
@@ -2299,6 +2493,9 @@ static void update_adc_sample_pos(mc_timer_struct *timer_tmp) {
 	timer_tmp->val_sample = val_sample;
 	timer_tmp->curr1_sample = curr1_sample;
 	timer_tmp->curr2_sample = curr2_sample;
+#ifdef HW_HAS_3_SHUNTS
+	timer_tmp->curr3_sample = curr3_sample;
+#endif
 }
 
 static void update_rpm_tacho(void) {
@@ -2377,6 +2574,7 @@ static void commutate(int steps) {
 	update_adc_sample_pos(&timer_tmp);
 	set_next_timer_settings(&timer_tmp);
 	update_sensor_mode();
+	conf->comm_mode = comm_mode_next;
 }
 
 static void set_next_timer_settings(mc_timer_struct *settings) {
@@ -2409,6 +2607,9 @@ static void update_timer_attempt(void) {
 		TIM8->CCR1 = timer_struct.val_sample;
 		TIM1->CCR4 = timer_struct.curr1_sample;
 		TIM8->CCR2 = timer_struct.curr2_sample;
+#ifdef HW_HAS_3_SHUNTS
+		TIM8->CCR3 = timer_struct.curr3_sample;
+#endif
 
 		// Enables preload register updates
 		TIM1->CR1 &= ~TIM_CR1_UDIS;
@@ -2490,6 +2691,11 @@ static void set_next_comm_step(int next_step) {
 
 	if (next_step == 1) {
 		if (direction) {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR1();
+			ENABLE_BR2();
+			ENABLE_BR3();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
@@ -2505,6 +2711,11 @@ static void set_next_comm_step(int next_step) {
 			TIM_CCxCmd(TIM1, TIM_Channel_3, negative_highside);
 			TIM_CCxNCmd(TIM1, TIM_Channel_3, negative_lowside);
 		} else {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR1();
+			ENABLE_BR3();
+			ENABLE_BR2();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
@@ -2522,6 +2733,11 @@ static void set_next_comm_step(int next_step) {
 		}
 	} else if (next_step == 2) {
 		if (direction) {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR2();
+			ENABLE_BR1();
+			ENABLE_BR3();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_2, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_2, TIM_CCx_Enable);
@@ -2537,6 +2753,11 @@ static void set_next_comm_step(int next_step) {
 			TIM_CCxCmd(TIM1, TIM_Channel_3, negative_highside);
 			TIM_CCxNCmd(TIM1, TIM_Channel_3, negative_lowside);
 		} else {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR3();
+			ENABLE_BR1();
+			ENABLE_BR2();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_3, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_3, TIM_CCx_Enable);
@@ -2554,6 +2775,11 @@ static void set_next_comm_step(int next_step) {
 		}
 	} else if (next_step == 3) {
 		if (direction) {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR3();
+			ENABLE_BR1();
+			ENABLE_BR2();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_3, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_3, TIM_CCx_Enable);
@@ -2569,6 +2795,11 @@ static void set_next_comm_step(int next_step) {
 			TIM_CCxCmd(TIM1, TIM_Channel_2, negative_highside);
 			TIM_CCxNCmd(TIM1, TIM_Channel_2, negative_lowside);
 		} else {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR2();
+			ENABLE_BR1();
+			ENABLE_BR3();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_2, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_2, TIM_CCx_Enable);
@@ -2586,6 +2817,11 @@ static void set_next_comm_step(int next_step) {
 		}
 	} else if (next_step == 4) {
 		if (direction) {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR1();
+			ENABLE_BR3();
+			ENABLE_BR2();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
@@ -2601,6 +2837,11 @@ static void set_next_comm_step(int next_step) {
 			TIM_CCxCmd(TIM1, TIM_Channel_2, negative_highside);
 			TIM_CCxNCmd(TIM1, TIM_Channel_2, negative_lowside);
 		} else {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR1();
+			ENABLE_BR2();
+			ENABLE_BR3();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);
@@ -2618,6 +2859,11 @@ static void set_next_comm_step(int next_step) {
 		}
 	} else if (next_step == 5) {
 		if (direction) {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR2();
+			ENABLE_BR3();
+			ENABLE_BR1();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_2, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_2, TIM_CCx_Enable);
@@ -2633,6 +2879,11 @@ static void set_next_comm_step(int next_step) {
 			TIM_CCxCmd(TIM1, TIM_Channel_1, negative_highside);
 			TIM_CCxNCmd(TIM1, TIM_Channel_1, negative_lowside);
 		} else {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR3();
+			ENABLE_BR2();
+			ENABLE_BR1();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_3, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_3, TIM_CCx_Enable);
@@ -2650,6 +2901,11 @@ static void set_next_comm_step(int next_step) {
 		}
 	} else if (next_step == 6) {
 		if (direction) {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR3();
+			ENABLE_BR2();
+			ENABLE_BR1();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_3, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_3, TIM_CCx_Enable);
@@ -2665,6 +2921,11 @@ static void set_next_comm_step(int next_step) {
 			TIM_CCxCmd(TIM1, TIM_Channel_1, negative_highside);
 			TIM_CCxNCmd(TIM1, TIM_Channel_1, negative_lowside);
 		} else {
+#ifdef HW_HAS_DRV8313
+			DISABLE_BR2();
+			ENABLE_BR3();
+			ENABLE_BR1();
+#endif
 			// 0
 			TIM_SelectOCxM(TIM1, TIM_Channel_2, TIM_OCMode_Inactive);
 			TIM_CCxCmd(TIM1, TIM_Channel_2, TIM_CCx_Enable);
@@ -2681,6 +2942,11 @@ static void set_next_comm_step(int next_step) {
 			TIM_CCxNCmd(TIM1, TIM_Channel_1, negative_lowside);
 		}
 	} else {
+#ifdef HW_HAS_DRV8313
+		DISABLE_BR1();
+		DISABLE_BR2();
+		DISABLE_BR3();
+#endif
 		// Invalid phase.. stop PWM!
 		TIM_SelectOCxM(TIM1, TIM_Channel_1, TIM_ForcedAction_InActive);
 		TIM_CCxCmd(TIM1, TIM_Channel_1, TIM_CCx_Enable);

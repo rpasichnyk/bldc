@@ -1,12 +1,14 @@
 /*
-	Copyright 2012-2015 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -20,6 +22,7 @@
 #include "stm32f4xx_conf.h"
 #include "isr_vector_table.h"
 #include "mc_interface.h"
+#include "mcpwm_foc.h"
 #include "servo.h"
 #include "hw.h"
 #include "encoder.h"
@@ -55,5 +58,14 @@ CH_IRQ_HANDLER(HW_ENC_TIM_ISR_VEC) {
 
 		// Clear the IT pending bit
 		TIM_ClearITPendingBit(HW_ENC_TIM, TIM_IT_Update);
+	}
+}
+
+CH_IRQ_HANDLER(TIM8_CC_IRQHandler) {
+	if (TIM_GetITStatus(TIM8, TIM_IT_CC1) != RESET) {
+		mcpwm_foc_tim_sample_int_handler();
+
+		// Clear the IT pending bit
+		TIM_ClearITPendingBit(TIM8, TIM_IT_CC1);
 	}
 }

@@ -1,12 +1,14 @@
 /*
-	Copyright 2015 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -41,7 +43,7 @@
 #define APPCONF_APP_TO_USE					APP_UART
 #endif
 
-// PPM app
+// PPM app configureation
 #ifndef APPCONF_PPM_CTRL_TYPE
 #define APPCONF_PPM_CTRL_TYPE				PPM_CTRL_TYPE_NONE
 #endif
@@ -57,17 +59,29 @@
 #ifndef APPCONF_PPM_PULSE_END
 #define APPCONF_PPM_PULSE_END				2.0
 #endif
+#ifndef APPCONF_PPM_PULSE_CENTER
+#define APPCONF_PPM_PULSE_CENTER			1.5
+#endif
 #ifndef APPCONF_PPM_MEDIAN_FILTER
 #define APPCONF_PPM_MEDIAN_FILTER			true
 #endif
 #ifndef APPCONF_PPM_SAFE_START
 #define APPCONF_PPM_SAFE_START				true
 #endif
-#ifndef APPCONF_PPM_RPM_LIM_START
-#define APPCONF_PPM_RPM_LIM_START			150000
+#ifndef APPCONF_PPM_THROTTLE_EXP
+#define APPCONF_PPM_THROTTLE_EXP			0.0
 #endif
-#ifndef APPCONF_PPM_RPM_LIM_END
-#define APPCONF_PPM_RPM_LIM_END				200000
+#ifndef APPCONF_PPM_THROTTLE_EXP_BRAKE
+#define APPCONF_PPM_THROTTLE_EXP_BRAKE		0.0
+#endif
+#ifndef APPCONF_PPM_THROTTLE_EXP_MODE
+#define APPCONF_PPM_THROTTLE_EXP_MODE		THR_EXP_POLY
+#endif
+#ifndef APPCONF_PPM_RAMP_TIME_POS
+#define APPCONF_PPM_RAMP_TIME_POS			0.3
+#endif
+#ifndef APPCONF_PPM_RAMP_TIME_NEG
+#define APPCONF_PPM_RAMP_TIME_NEG			0.1
 #endif
 #ifndef APPCONF_PPM_MULTI_ESC
 #define APPCONF_PPM_MULTI_ESC				false
@@ -92,6 +106,15 @@
 #ifndef APPCONF_ADC_VOLTAGE_END
 #define APPCONF_ADC_VOLTAGE_END				3.0
 #endif
+#ifndef APPCONF_ADC_VOLTAGE_CENTER
+#define APPCONF_ADC_VOLTAGE_CENTER			2.0
+#endif
+#ifndef APPCONF_ADC_VOLTAGE2_START
+#define APPCONF_ADC_VOLTAGE2_START			0.9
+#endif
+#ifndef APPCONF_ADC_VOLTAGE2_END
+#define APPCONF_ADC_VOLTAGE2_END				3.0
+#endif
 #ifndef APPCONF_ADC_USE_FILTER
 #define APPCONF_ADC_USE_FILTER				true
 #endif
@@ -107,11 +130,23 @@
 #ifndef APPCONF_ADC_VOLTAGE_INVERTED
 #define APPCONF_ADC_VOLTAGE_INVERTED		false
 #endif
-#ifndef APPCONF_ADC_RPM_LIM_START
-#define APPCONF_ADC_RPM_LIM_START			150000.0
+#ifndef APPCONF_ADC_VOLTAGE2_INVERTED
+#define APPCONF_ADC_VOLTAGE2_INVERTED		false
 #endif
-#ifndef APPCONF_ADC_RPM_LIM_END
-#define APPCONF_ADC_RPM_LIM_END				200000.0
+#ifndef APPCONF_ADC_THROTTLE_EXP
+#define APPCONF_ADC_THROTTLE_EXP			0.0
+#endif
+#ifndef APPCONF_ADC_THROTTLE_EXP_BRAKE
+#define APPCONF_ADC_THROTTLE_EXP_BRAKE		0.0
+#endif
+#ifndef APPCONF_ADC_THROTTLE_EXP_MODE
+#define APPCONF_ADC_THROTTLE_EXP_MODE		THR_EXP_POLY
+#endif
+#ifndef APPCONF_ADC_RAMP_TIME_POS
+#define APPCONF_ADC_RAMP_TIME_POS			0.9
+#endif
+#ifndef APPCONF_ADC_RAMP_TIME_NEG
+#define APPCONF_ADC_RAMP_TIME_NEG			0.3
 #endif
 #ifndef APPCONF_ADC_MULTI_ESC
 #define APPCONF_ADC_MULTI_ESC				false
@@ -138,12 +173,6 @@
 #ifndef APPCONF_CHUK_HYST
 #define APPCONF_CHUK_HYST					0.15
 #endif
-#ifndef APPCONF_CHUK_RPM_LIM_START
-#define APPCONF_CHUK_RPM_LIM_START			150000.0
-#endif
-#ifndef APPCONF_CHUK_RPM_LIM_END
-#define APPCONF_CHUK_RPM_LIM_END			200000.0
-#endif
 #ifndef APPCONF_CHUK_RAMP_TIME_POS
 #define APPCONF_CHUK_RAMP_TIME_POS			0.9
 #endif
@@ -152,6 +181,15 @@
 #endif
 #ifndef APPCONF_STICK_ERPM_PER_S_IN_CC
 #define APPCONF_STICK_ERPM_PER_S_IN_CC		3000.0
+#endif
+#ifndef APPCONF_CHUK_THROTTLE_EXP
+#define APPCONF_CHUK_THROTTLE_EXP			0.0
+#endif
+#ifndef APPCONF_CHUK_THROTTLE_EXP_BRAKE
+#define APPCONF_CHUK_THROTTLE_EXP_BRAKE		0.0
+#endif
+#ifndef APPCONF_CHUK_THROTTLE_EXP_MODE
+#define APPCONF_CHUK_THROTTLE_EXP_MODE		THR_EXP_POLY
 #endif
 #ifndef APPCONF_CHUK_MULTI_ESC
 #define APPCONF_CHUK_MULTI_ESC				false

@@ -1,12 +1,14 @@
 /*
-	Copyright 2012-2014 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -15,17 +17,11 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
     */
 
-/*
- * utils.c
- *
- *  Created on: 16 maj 2013
- *      Author: benjamin
- */
-
 #include "utils.h"
 #include "ch.h"
 #include "hal.h"
 #include <math.h>
+#include <string.h>
 
 // Private variables
 static volatile int sys_lock_cnt = 0;
@@ -91,6 +87,34 @@ int utils_truncate_number(float *number, float min, float max) {
 		did_trunc = 1;
 	} else if (*number < min) {
 		*number = min;
+		did_trunc = 1;
+	}
+
+	return did_trunc;
+}
+
+int utils_truncate_number_int(int *number, int min, int max) {
+	int did_trunc = 0;
+
+	if (*number > max) {
+		*number = max;
+		did_trunc = 1;
+	} else if (*number < min) {
+		*number = min;
+		did_trunc = 1;
+	}
+
+	return did_trunc;
+}
+
+int utils_truncate_number_abs(float *number, float max) {
+	int did_trunc = 0;
+
+	if (*number > max) {
+		*number = max;
+		did_trunc = 1;
+	} else if (*number < -max) {
+		*number = -max;
 		did_trunc = 1;
 	}
 
@@ -284,7 +308,7 @@ float utils_fast_inv_sqrt(float x) {
  * The angle in radians
  */
 float utils_fast_atan2(float y, float x) {
-	float abs_y = fabsf(y) + 1e-10; // kludge to prevent 0/0 condition
+	float abs_y = fabsf(y) + 1e-20; // kludge to prevent 0/0 condition
 	float angle;
 
 	if (x >= 0) {
@@ -451,6 +475,124 @@ void utils_fast_sincos_better(float angle, float *sin, float *cos) {
 			*cos = 0.225 * (*cos * *cos - *cos) + *cos;
 		}
 	}
+}
+
+/**
+ * Calculate the values with the lowest magnitude.
+ *
+ * @param va
+ * The first value.
+ *
+ * @param vb
+ * The second value.
+ *
+ * @return
+ * The value with the lowest magnitude.
+ */
+float utils_min_abs(float va, float vb) {
+	float res;
+	if (fabsf(va) < fabsf(vb)) {
+		res = va;
+	} else {
+		res = vb;
+	}
+
+	return res;
+}
+
+/**
+ * Calculate the values with the highest magnitude.
+ *
+ * @param va
+ * The first value.
+ *
+ * @param vb
+ * The second value.
+ *
+ * @return
+ * The value with the highest magnitude.
+ */
+float utils_max_abs(float va, float vb) {
+	float res;
+	if (fabsf(va) > fabsf(vb)) {
+		res = va;
+	} else {
+		res = vb;
+	}
+
+	return res;
+}
+
+/**
+ * Create string representation of the binary content of a byte
+ *
+ * @param x
+ * The byte.
+ *
+ * @param b
+ * Array to store the string representation in.
+ */
+void utils_byte_to_binary(int x, char *b) {
+	b[0] = '\0';
+
+	int z;
+	for (z = 128; z > 0; z >>= 1) {
+		strcat(b, ((x & z) == z) ? "1" : "0");
+	}
+}
+
+float utils_throttle_curve(float val, float curve_acc, float curve_brake, int mode) {
+	float ret = 0.0;
+	float val_a = fabsf(val);
+
+	if (val < -1.0) {
+		val = -1.0;
+	}
+
+	if (val > 1.0) {
+		val = 1.0;
+	}
+
+	float curve;
+	if (val >= 0.0) {
+		curve = curve_acc;
+	} else {
+		curve = curve_brake;
+	}
+
+	// See
+	// http://math.stackexchange.com/questions/297768/how-would-i-create-a-exponential-ramp-function-from-0-0-to-1-1-with-a-single-val
+	if (mode == 0) { // Power
+		if (curve >= 0.0) {
+			ret = 1.0 - powf(1.0 - val_a, 1.0 + curve);
+		} else {
+			ret = powf(val_a, 1.0 - curve);
+		}
+	} else if (mode == 1) { // Exponential
+		if (fabsf(curve) < 1e-10) {
+			ret = val_a;
+		} else {
+			if (curve >= 0.0) {
+				ret = 1.0 - ((expf(curve * (1.0 - val_a)) - 1.0) / (expf(curve) - 1.0));
+			} else {
+				ret = (expf(-curve * val_a) - 1.0) / (expf(-curve) - 1.0);
+			}
+		}
+	} else if (mode == 2) { // Polynomial
+		if (curve >= 0.0) {
+			ret = 1.0 - ((1.0 - val_a) / (1.0 + curve * val_a));
+		} else {
+			ret = val_a / (1.0 - curve * (1.0 - val_a));
+		}
+	} else { // Linear
+		ret = val_a;
+	}
+
+	if (val < 0.0) {
+		ret = -ret;
+	}
+
+	return ret;
 }
 
 /**

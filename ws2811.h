@@ -1,12 +1,14 @@
 /*
-	Copyright 2012-2014 Benjamin Vedder	benjamin@vedder.se
+	Copyright 2016 Benjamin Vedder	benjamin@vedder.se
 
-	This program is free software: you can redistribute it and/or modify
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation, either version 3 of the License, or
     (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
+    The VESC firmware is distributed in the hope that it will be useful,
     but WITHOUT ANY WARRANTY; without even the implied warranty of
     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
     GNU General Public License for more details.
@@ -14,13 +16,6 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
     */
-
-/*
- * ws2811.h
- *
- *  Created on: 14 jul 2013
- *      Author: benjamin
- */
 
 #ifndef WS2811_H_
 #define WS2811_H_
@@ -76,5 +71,7 @@ void ws2811_set_led_color(int led, uint32_t color);
 uint32_t ws2811_get_led_color(int led);
 void ws2811_all_off(void);
 void ws2811_set_all(uint32_t color);
+void ws2811_set_brightness(uint32_t br);
+uint32_t ws2811_get_brightness(void);
 
 #endif /* WS2811_H_ */
